@@ -54,10 +54,10 @@ def initialize_document():
             document_content = []
             print("📝 Starting with empty document list")
     except (json.JSONDecodeError, FileNotFoundError) as e:
-        print(f"⚠️ Error loading or parsing file.json: {e}. Initializing document_content as empty list.")
+        print(f"Error loading or parsing file.json: {e}. Initializing document_content as empty list.")
         document_content = []
     except Exception as e:
-        print(f"⚠️ An unexpected error occurred during initialization: {e}. Initializing document_content as empty list.")
+        print(f"An unexpected error occurred during initialization: {e}. Initializing document_content as empty list.")
         document_content = []
 
 
@@ -339,4 +339,5 @@ def run_document_agent():
 
 
 if __name__ == "__main__":
+
     run_document_agent()
