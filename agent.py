@@ -1,7 +1,5 @@
 import sys
 !{sys.executable} -m pip install -U langchain-openai
-
-
 from typing import Annotated, Sequence, TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage, messages_from_dict, messages_to_dict
 from langchain_openai import ChatOpenAI
@@ -13,60 +11,51 @@ import os
 import json
 from datetime import datetime
 
-
-
-
-
 document_content: list[BaseMessage]
 system_prompt = SystemMessage(f"""
     You are a versatile, domain-independent AI assistant capable of handling various tasks.
-    You can act as a personal assistant, research assistant, scheduler, planner, or any other role the user needs.
-    you must grap the histories by reading the file.json using a function tool.but don't tell that you have read the file.json. unless it is asked.
+
+    CRITICAL RULES:
+    1. use the tools whenever they are required in planing scheduling, and also reading the file.
+    2. Don't chain multiple tool calls in one response
+    3. After using a tool, wait for the tool result before planning next action
 
     Available capabilities:
-    - Read files (read_file) to have memory of past conversations
-    - Save files (save_file)
-    - Create plans and break down tasks (create_plan)
-    - Create schedules and task boards (create_schedule)
+    - Read files (read_file) whenever thing's asked that you don't know.
+    - Save files (save_file) 
+    - Create plans and break down tasks (create_plan) whenever planing is needed use this tool
+    - Create schedules and task boards (create_schedule) whenever scheduling is needed use this plan everytime.
     - Get current time (get_current_time)
 
     Instructions:
-    - Understand the user's role request (e.g., "you're my personal assistant", "you're my research assistant")
-    - Use appropriate tools to accomplish the task
-    - For planning tasks, use create_plan to break them into chunks
-    - For research tasks, use search_information
-    - For scheduling tasks, use create_schedule
-    - Show the current document state after modifications
-    - Be proactive in using tools to complete tasks""")
+    - Use ONE appropriate tool to accomplish the task
+    - For "do i have any schedule here?" use read_file first
+    - Only create new schedules if asked to create one
+    - Don't create plans or schedules unless explicitly requested
+""")
 
 
 def initialize_document():
-    """Initializes document_content by reading from file.json if it exists."""
     global document_content
-    try:
-        if os.path.exists("file.json"):
-            with open("file.json", "r", encoding="utf-8") as f:
+    document_content = []
 
-                loaded_data = json.load(f)
-                document_content = messages_from_dict(loaded_data)
-            print(f"📖 Loaded existing document from file.json ({len(document_content)} messages)")
-        else:
-            document_content = []
-            print("📝 Starting with empty document list")
-    except (json.JSONDecodeError, FileNotFoundError) as e:
-        print(f"Error loading or parsing file.json: {e}. Initializing document_content as empty list.")
-        document_content = []
-    except Exception as e:
-        print(f"An unexpected error occurred during initialization: {e}. Initializing document_content as empty list.")
-        document_content = []
+    if not os.path.exists("file.json"):
+        return
+
+    for m in json.load(open("file.json", encoding="utf-8")):
+        if m["role"] == "human":
+            document_content.append(HumanMessage(m["content"]))
+        elif m["role"] == "ai":
+            document_content.append(AIMessage(m["content"]))
+        elif m["role"] == "tool":
+            document_content.append(ToolMessage(m["content"]))
 
 
-# Initialize on import
+
 initialize_document()
 
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    chat_counter:int
 
 
 
@@ -109,20 +98,32 @@ def read_file(filename: str = "file.json") -> str:
 
 
 @tool
-def save_file(filename: str = "file.json") -> str:
-    """Save the full document_content to JSON, no filtering."""
-    global document_content
-    print("agent is using saving tool")
+def save_file(filename="file.json"):
+    """this function saves the document content to retain the memory for the next time when it is asked to respond
+      Args:
+        filename: Name of the JSON file to save (default: file.json).
 
+      Returns:
+    """
+    global document_content
     if not filename.endswith(".json"):
         filename += ".json"
 
-    data_to_save = messages_to_dict(document_content)
+    data = []
+
+    for m in document_content:
+        if isinstance(m, HumanMessage):
+            data.append({"role": "human", "content": m.content})
+        elif isinstance(m, AIMessage):
+            data.append({"role": "ai", "content": m.content})
+        elif isinstance(m, ToolMessage):
+            data.append({"role": "tool", "content": m.content})
 
     with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data_to_save, f, indent=2)
+        json.dump(data, f, indent=2)
 
-    return f"Saved {len(document_content)} messages to {filename}"
+    return f"saved {len(data)} messages"
+
 
 
 
@@ -237,9 +238,6 @@ tools = [
 ]
 
 
-from langchain_openai import ChatOpenAI
-
-
 model = ChatOpenAI(
     api_key=OPENROUTER_API_KEY,
     openai_api_base="https://openrouter.ai/api/v1",
@@ -263,18 +261,14 @@ def our_agent(state: AgentState) -> AgentState:
         document_content.append(msg)
 
 
-    all_messages = [system_prompt, SystemMessage(f"Current document content: {len(document_content)} messages.")] + list(state["messages"])
+    all_messages = [system_prompt, SystemMessage(f"Current document content: {document_content} messages.")] + list(state["messages"])
     response = model.bind_tools(tools).invoke(all_messages, stream=False)
-
+    print(response)
     state["messages"].append(response)
     document_content.append(response)
 
     print(f"\n🤖 AI: {response.content}\n")
     return state
-
-
-
-
 def should_continue(state: AgentState):
     last_human = None
     for msg in reversed(state["messages"]):
@@ -285,57 +279,52 @@ def should_continue(state: AgentState):
     if last_human is None:
         return "continue"
 
-    if any(word in last_human for word in ["done", "exit", "no more", "quit"]):
+    exit_commands = ["done", "exit", "quit", "goodbye", "bye", "stop", "end"]
+    if any(cmd in last_human for cmd in exit_commands):
         save_file.func("file.json")
         return "end"
 
     return "continue"
 
-graph = StateGraph(AgentState)
 
+
+graph = StateGraph(AgentState)
 graph.add_node("agent", our_agent)
 graph.add_node("tools", ToolNode(tools))
-
 graph.set_entry_point("agent")
-
-graph.add_edge("agent", "tools")
-
 graph.add_conditional_edges(
-    "tools",
+    "agent",
     should_continue,
     {
-        "continue": "agent",
+        "continue": "tools",
         "end": END,
     },
 )
-
+graph.add_edge("tools", "agent")
 app = graph.compile()
 
 def run_document_agent():
     global document_content
-
+    
     print("\n" + "=" * 60)
     print(f"📖 Current document: {len(document_content)} messages loaded from file.json")
     print("=" * 60)
-
-    state = {
-        "messages": [],
-        "chat_counter": 0
-    }
-
-    while True:
-        state = our_agent(state)  
-        if should_continue(state) == "end":
-
-            serializable_messages = messages_to_dict(document_content)
-            with open("file.json", 'w', encoding='utf-8') as file:
-                json.dump(serializable_messages, file, indent=2)
-            print(f"\n💾 Document saved to file.json ({len(document_content)} messages)")
-            break
-
+    
+    
+    state = {}
+    
+    # Use the compiled graph
+    for event in app.stream(state, {"recursion_limit": 100}):
+        for value in event.values():
+            print(f"Node completed: {list(event.keys())[0]}")
+    
+    # Save at the end
+    save_file.func("file.json")
+    
     print("\n" + "=" * 60)
     print("✅ AGENT FINISHED")
     print("=" * 60)
+
 
 
 if __name__ == "__main__":
